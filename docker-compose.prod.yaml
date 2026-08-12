@@ -1,11 +1,14 @@
 # Production stack for a self-hosted Postiz.
 #
+# The stack serves plain HTTP on POSTIZ_BIND:POSTIZ_PORT — the domain and the
+# TLS certificate are expected to live on a separate reverse proxy, which
+# forwards to that address. MAIN_URL is the public https:// URL of that proxy.
+#
 # Everything is configured through a single `.env` file next to this compose
 # file — run `make init` to create it, then `make up`. See DEPLOY.md.
 #
 # Optional services are behind compose profiles, enabled via COMPOSE_PROFILES
 # in `.env`:
-#   caddy         — reverse proxy with automatic HTTPS certificates
 #   elasticsearch — Temporal advanced visibility (needs ~1GB extra RAM)
 #   tools         — Temporal UI, bound to localhost only
 
@@ -43,8 +46,8 @@ services:
       - postiz-config:/config/
       - postiz-uploads:/uploads/
     ports:
-      # Bound to localhost by default — the reverse proxy reaches the container
-      # over the compose network, so nothing needs to be public here.
+      # Reachable by the reverse proxy VM — bind this to the private interface
+      # this server shares with it, not to a public address.
       - '${POSTIZ_BIND:-127.0.0.1}:${POSTIZ_PORT:-4007}:5000'
     networks:
       - postiz-network
@@ -103,28 +106,6 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
-
-  caddy:
-    image: caddy:2-alpine
-    container_name: postiz-caddy
-    restart: always
-    profiles: ['caddy']
-    logging: *default-logging
-    environment:
-      MAIN_DOMAIN: ${MAIN_DOMAIN:-}
-      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL:-}
-    ports:
-      - '80:80'
-      - '443:443'
-      - '443:443/udp'
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
-    networks:
-      - postiz-network
-    depends_on:
-      - postiz
 
   # -----------------------
   # Temporal Stack
@@ -225,10 +206,6 @@ volumes:
   temporal-postgres-volume:
     external: false
   temporal-elasticsearch-data:
-    external: false
-  caddy-data:
-    external: false
-  caddy-config:
     external: false
 
 networks:

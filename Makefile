@@ -34,7 +34,8 @@ init:
 	 sed -i "s|^TEMPORAL_POSTGRES_PASSWORD=.*|TEMPORAL_POSTGRES_PASSWORD=$$tpg|" .env
 	@chmod 600 .env
 	@echo "-> .env created with generated secrets."
-	@echo "   Now fill in MAIN_URL, and MAIN_DOMAIN + LETSENCRYPT_EMAIL if you use the caddy profile."
+	@echo "   Now fill in MAIN_URL (the public https:// address served by the proxy)"
+	@echo "   and POSTIZ_BIND (this VM's private IP, reachable from the proxy)."
 	@echo "   Then run: make check && make up"
 
 check:
@@ -51,11 +52,10 @@ check:
 	   http://*|https://*|"") ;; \
 	   *) echo "!! MAIN_URL must start with http:// or https://"; ok=0;; \
 	 esac; \
-	 profiles=$$(get COMPOSE_PROFILES); \
-	 case "$$profiles" in *caddy*) \
-	   need MAIN_DOMAIN "the caddy profile needs the bare domain, without https://"; \
-	   need LETSENCRYPT_EMAIL "the caddy profile needs an email for the certificates";; \
+	 case "$$(get POSTIZ_BIND)" in \
+	   127.0.0.1|localhost|"") echo "?? POSTIZ_BIND is on loopback — a reverse proxy on another host will not reach it";; \
 	 esac; \
+	 profiles=$$(get COMPOSE_PROFILES); \
 	 es=$$(get TEMPORAL_ENABLE_ES); \
 	 case "$$profiles" in \
 	   *elasticsearch*) [ "$$es" = "true" ] || { echo "!! elasticsearch is in COMPOSE_PROFILES, so TEMPORAL_ENABLE_ES must be true"; ok=0; };; \
