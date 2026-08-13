@@ -5,8 +5,11 @@ COMPOSE := docker compose -f docker-compose.prod.yaml
 
 # Free disk `make image` insists on before starting. The build succeeds and
 # then dies while unpacking when the disk runs out, ~40 minutes in, so the
-# check is worth the false positive. Override with: make image FORCE=1
-IMAGE_MIN_FREE_GB ?= 10
+# check is worth the false positive. Measured on a 41GB VM: the build left
+# 10.8GB of buildx cache behind and still ran out with ~30GB free at the
+# start, because the export and the unpack are resident at the same time.
+# Override with: make image FORCE=1
+IMAGE_MIN_FREE_GB ?= 25
 
 .DEFAULT_GOAL := help
 .PHONY: help init check image up down restart logs ps pull update backup restore shell psql temporal-ui
