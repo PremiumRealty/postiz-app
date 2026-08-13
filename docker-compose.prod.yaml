@@ -1,0 +1,215 @@
+# Production stack for a self-hosted Postiz.
+#
+# The stack serves plain HTTP on POSTIZ_BIND:POSTIZ_PORT — the domain and the
+# TLS certificate are expected to live on a separate reverse proxy, which
+# forwards to that address. MAIN_URL is the public https:// URL of that proxy.
+#
+# Everything is configured through a single `.env` file next to this compose
+# file — run `make init` to create it, then `make up`. See DEPLOY.md.
+#
+# Optional services are behind compose profiles, enabled via COMPOSE_PROFILES
+# in `.env`:
+#   elasticsearch — Temporal advanced visibility (needs ~1GB extra RAM)
+#   tools         — Temporal UI, bound to localhost only
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
+services:
+  postiz:
+    image: ghcr.io/gitroomhq/postiz-app:${POSTIZ_VERSION:-latest}
+    container_name: postiz
+    restart: always
+    logging: *default-logging
+    # Every user-facing setting (JWT_SECRET, MAIN_URL, social media keys, ...)
+    # comes straight from .env, so adding a new provider key never requires
+    # touching this file.
+    env_file: .env
+    environment:
+      # Derived values: kept here so a password or a URL is written in exactly
+      # one place in .env and can never drift between services.
+      DATABASE_URL: 'postgresql://${POSTGRES_USER:-postiz-user}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set in .env — run make init}@postiz-postgres:5432/${POSTGRES_DB:-postiz-db-local}'
+      REDIS_URL: 'redis://postiz-redis:6379'
+      TEMPORAL_ADDRESS: 'temporal:7233'
+      BACKEND_INTERNAL_URL: 'http://localhost:3000'
+      MAIN_URL: '${MAIN_URL:?MAIN_URL is not set in .env}'
+      FRONTEND_URL: '${MAIN_URL}'
+      NEXT_PUBLIC_BACKEND_URL: '${MAIN_URL}/api'
+      UPLOAD_DIRECTORY: '/uploads'
+      NEXT_PUBLIC_UPLOAD_DIRECTORY: '/uploads'
+      NEXT_PUBLIC_UPLOAD_STATIC_DIRECTORY: '/uploads'
+      IS_GENERAL: 'true'
+    volumes:
+      - postiz-config:/config/
+      - postiz-uploads:/uploads/
+    ports:
+      # Reachable by the reverse proxy VM — bind this to the private interface
+      # this server shares with it, not to a public address.
+      - '${POSTIZ_BIND:-127.0.0.1}:${POSTIZ_PORT:-4007}:5000'
+    networks:
+      - postiz-network
+      - temporal-network
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:5000/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      # First boot runs prisma db push and warms the app up.
+      start_period: 300s
+    depends_on:
+      postiz-postgres:
+        condition: service_healthy
+      postiz-redis:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+
+  postiz-postgres:
+    image: postgres:17-alpine
+    container_name: postiz-postgres
+    restart: always
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postiz-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is not set in .env — run make init}
+      POSTGRES_DB: ${POSTGRES_DB:-postiz-db-local}
+    volumes:
+      - postgres-volume:/var/lib/postgresql/data
+    networks:
+      - postiz-network
+    healthcheck:
+      test: pg_isready -U ${POSTGRES_USER:-postiz-user} -d ${POSTGRES_DB:-postiz-db-local}
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  postiz-redis:
+    image: redis:7.2
+    container_name: postiz-redis
+    restart: always
+    logging: *default-logging
+    volumes:
+      - postiz-redis-data:/data
+    networks:
+      - postiz-network
+    healthcheck:
+      test: redis-cli ping
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # -----------------------
+  # Temporal Stack
+  # -----------------------
+  temporal-postgresql:
+    image: postgres:16
+    container_name: temporal-postgresql
+    restart: always
+    logging: *default-logging
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: ${TEMPORAL_POSTGRES_PASSWORD:?TEMPORAL_POSTGRES_PASSWORD is not set in .env — run make init}
+    expose:
+      - 5432
+    volumes:
+      - temporal-postgres-volume:/var/lib/postgresql/data
+    networks:
+      - temporal-network
+    healthcheck:
+      test: pg_isready -U temporal
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  temporal:
+    image: temporalio/auto-setup:1.28.1
+    container_name: temporal
+    restart: always
+    logging: *default-logging
+    environment:
+      DB: postgres12
+      DB_PORT: '5432'
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: ${TEMPORAL_POSTGRES_PASSWORD:?TEMPORAL_POSTGRES_PASSWORD is not set in .env — run make init}
+      POSTGRES_SEEDS: temporal-postgresql
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/development-sql.yaml
+      # Elasticsearch is optional — see COMPOSE_PROFILES in .env. Both values
+      # have to be changed together (profile off => ENABLE_ES false).
+      ENABLE_ES: ${TEMPORAL_ENABLE_ES:-true}
+      ES_SEEDS: temporal-elasticsearch
+      ES_VERSION: v7
+      TEMPORAL_NAMESPACE: default
+    volumes:
+      - ./dynamicconfig:/etc/temporal/config/dynamicconfig
+    networks:
+      - temporal-network
+    depends_on:
+      temporal-postgresql:
+        condition: service_healthy
+
+  temporal-elasticsearch:
+    image: elasticsearch:7.17.27
+    container_name: temporal-elasticsearch
+    restart: always
+    profiles: ['elasticsearch']
+    logging: *default-logging
+    environment:
+      - cluster.routing.allocation.disk.threshold_enabled=true
+      - cluster.routing.allocation.disk.watermark.low=512mb
+      - cluster.routing.allocation.disk.watermark.high=256mb
+      - cluster.routing.allocation.disk.watermark.flood_stage=128mb
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms256m -Xmx256m
+      - xpack.security.enabled=false
+    expose:
+      - 9200
+    volumes:
+      - temporal-elasticsearch-data:/usr/share/elasticsearch/data
+    networks:
+      - temporal-network
+
+  temporal-ui:
+    image: temporalio/ui:2.34.0
+    container_name: temporal-ui
+    restart: always
+    profiles: ['tools']
+    logging: *default-logging
+    environment:
+      - TEMPORAL_ADDRESS=temporal:7233
+      - TEMPORAL_CORS_ORIGINS=http://127.0.0.1:8080
+    ports:
+      # Localhost only — reach it with an SSH tunnel, see DEPLOY.md.
+      - '127.0.0.1:8080:8080'
+    networks:
+      - temporal-network
+    depends_on:
+      - temporal
+
+volumes:
+  postgres-volume:
+    external: false
+  postiz-redis-data:
+    external: false
+  postiz-config:
+    external: false
+  postiz-uploads:
+    external: false
+  temporal-postgres-volume:
+    external: false
+  temporal-elasticsearch-data:
+    external: false
+
+networks:
+  postiz-network:
+    external: false
+  temporal-network:
+    external: false
