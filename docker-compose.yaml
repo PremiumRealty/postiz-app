@@ -65,6 +65,8 @@ services:
       MASTODON_URL: 'https://mastodon.social'
       MASTODON_CLIENT_ID: ''
       MASTODON_CLIENT_SECRET: ''
+      VK_ID: ''
+      VK_SECRET: ''
 
       # === OAuth & Authentik Settings
       # NEXT_PUBLIC_POSTIZ_OAUTH_DISPLAY_NAME: 'Authentik'
