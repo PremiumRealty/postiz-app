@@ -20,7 +20,9 @@ x-logging: &default-logging
 
 services:
   postiz:
-    image: ghcr.io/gitroomhq/postiz-app:${POSTIZ_VERSION:-latest}
+    # Defaults to the upstream release. `make image` builds this branch instead
+    # and repoints POSTIZ_IMAGE/POSTIZ_VERSION in .env at the result.
+    image: ${POSTIZ_IMAGE:-ghcr.io/gitroomhq/postiz-app}:${POSTIZ_VERSION:-latest}
     container_name: postiz
     restart: always
     logging: *default-logging

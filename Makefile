@@ -4,13 +4,14 @@
 COMPOSE := docker compose -f docker-compose.prod.yaml
 
 .DEFAULT_GOAL := help
-.PHONY: help init check up down restart logs ps pull update backup restore shell psql temporal-ui
+.PHONY: help init check image up down restart logs ps pull update backup restore shell psql temporal-ui
 
 help:
 	@echo "Postiz deployment"
 	@echo ""
 	@echo "  make init      create .env from the template and generate secrets"
 	@echo "  make check     validate .env before starting anything"
+	@echo "  make image     build the app image from this branch and run that"
 	@echo "  make up        start the stack (pulls images first)"
 	@echo "  make down      stop the stack, keeping all data"
 	@echo "  make restart   restart the stack"
@@ -64,8 +65,26 @@ check:
 	 [ "$$ok" = "1" ] || exit 1; \
 	 echo "-> .env looks good"
 
+# Builds the app image from the working tree (the same Dockerfile the upstream
+# release is built from) and repoints .env at it, so the instance runs this
+# branch instead of ghcr.io. The tag carries the commit, so rolling back is
+# just POSTIZ_VERSION=<older commit>.
+# Needs ~4GB of RAM for the frontend build - see DEPLOY.md if this VM has less.
+image: check
+	@rev=$$(git rev-parse --short HEAD 2>/dev/null) || { echo "!! not a git checkout"; exit 1; }; \
+	 test -z "$$(git status --porcelain)" || rev="$$rev-dirty"; \
+	 set_env() { \
+	   if grep -qE "^#? *$$1=" .env; then sed -i "s|^#\? *$$1=.*|$$1=$$2|" .env; \
+	   else printf '%s=%s\n' "$$1" "$$2" >> .env; fi; }; \
+	 echo "-> building postiz-local:$$rev from $$(git rev-parse --abbrev-ref HEAD)"; \
+	 docker build -f Dockerfile.dev --build-arg NEXT_PUBLIC_VERSION="$$rev" \
+	   -t postiz-local:$$rev . || exit 1; \
+	 set_env POSTIZ_IMAGE postiz-local; \
+	 set_env POSTIZ_VERSION "$$rev"; \
+	 echo "-> .env now points at postiz-local:$$rev — run: make up"
+
 up: check
-	$(COMPOSE) pull
+	@$(MAKE) --no-print-directory pull
 	$(COMPOSE) up -d --remove-orphans
 	@echo "-> started. Follow the first boot with: make logs SERVICE=postiz"
 
@@ -81,11 +100,20 @@ logs:
 ps:
 	$(COMPOSE) ps
 
+# A locally built app image exists nowhere to pull from, so the pull is allowed
+# to fail for it - the database, Redis and Temporal images still come from a
+# registry and are still updated. A genuinely missing image fails on `up`.
 pull:
-	$(COMPOSE) pull
+	@if grep -qE '^POSTIZ_IMAGE=(postiz-local|localhost/)' .env 2>/dev/null; then \
+	  $(COMPOSE) pull --ignore-pull-failures; \
+	else \
+	  $(COMPOSE) pull; \
+	fi
 
 update: check
-	$(COMPOSE) pull
+	@grep -qE '^POSTIZ_IMAGE=(postiz-local|localhost/)' .env 2>/dev/null && \
+	  echo "?? running a locally built image — this updates the other services only; run 'make image' to rebuild the app" || true
+	@$(MAKE) --no-print-directory pull
 	$(COMPOSE) up -d --remove-orphans
 	docker image prune -f
 	@echo "-> updated"
