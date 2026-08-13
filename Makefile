@@ -3,6 +3,11 @@
 
 COMPOSE := docker compose -f docker-compose.prod.yaml
 
+# Free disk `make image` insists on before starting. The build succeeds and
+# then dies while unpacking when the disk runs out, ~40 minutes in, so the
+# check is worth the false positive. Override with: make image FORCE=1
+IMAGE_MIN_FREE_GB ?= 10
+
 .DEFAULT_GOAL := help
 .PHONY: help init check image up down restart logs ps pull update backup restore shell psql temporal-ui
 
@@ -73,6 +78,16 @@ check:
 image: check
 	@rev=$$(git rev-parse --short HEAD 2>/dev/null) || { echo "!! not a git checkout"; exit 1; }; \
 	 test -z "$$(git status --porcelain)" || rev="$$rev-dirty"; \
+	 root=$$(docker info -f '{{.DockerRootDir}}' 2>/dev/null); \
+	 [ -d "$$root" ] || root=/var/lib; \
+	 free=$$(df -BG --output=avail "$$root" 2>/dev/null | tail -n1 | tr -dc '0-9'); \
+	 if [ -n "$$free" ] && [ "$$free" -lt "$(IMAGE_MIN_FREE_GB)" ] && [ -z "$(FORCE)" ]; then \
+	   echo "!! only $${free}GB free on $$root, the image needs about $(IMAGE_MIN_FREE_GB)GB to build and unpack"; \
+	   echo "   reclaim space:  docker builder prune -af && docker image prune -af"; \
+	   echo "   then check:     docker system df"; \
+	   echo "   or override:    make image FORCE=1"; \
+	   exit 1; \
+	 fi; \
 	 set_env() { \
 	   if grep -qE "^#? *$$1=" .env; then sed -i "s|^#\? *$$1=.*|$$1=$$2|" .env; \
 	   else printf '%s=%s\n' "$$1" "$$2" >> .env; fi; }; \
